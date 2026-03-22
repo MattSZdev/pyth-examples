@@ -1,42 +1,76 @@
 import { Lucid, Blockfrost, Data } from "lucid-cardano";
 import blueprint from "../assets/plutus.json"; 
 
-// Definimos el Datum exacto que pusimos en Aiken
-const PegDatum = Data.Object({
+// 1. Definimos el Schema del Datum (debe coincidir con tu código Aiken)
+const PegDatumSchema = Data.Object({
   owner: Data.Bytes,
   lock_until: Data.Integer,
 });
 
 export const createLockTx = async (amountADA) => {
-  // 1. Iniciamos Lucid con tu API de Blockfrost
-  const lucid = await Lucid.new(
-    new Blockfrost("https://cardano-preprod.blockfrost.io/api/v0", "TU_PROJECT_ID"),
-    "Preprod"
-  );
+  try {
+    // 2. Iniciamos Lucid (Asegúrate de poner tu Project ID de Blockfrost)
+    const lucid = await Lucid.new(
+      new Blockfrost(
+        "https://cardano-preprod.blockfrost.io/api/v0", 
+        "preprodYourProjectIDHere" 
+      ),
+      "Preprod"
+    );
 
-  // 2. Conectamos la Wallet (Nami)
-  const api = await window.cardano.nami.enable();
-  lucid.selectWallet(api);
+    // 3. Verificación de Wallet segura
+    if (!window.cardano || !window.cardano.nami) {
+      throw new Error("Nami Wallet no encontrada. Por favor instálala.");
+    }
 
-  // 3. Obtenemos el validador del JSON
-  const validator = blueprint.validators.find(v => v.title === "peg_defense.spend");
-  const scriptAddress = lucid.utils.validatorToAddress(validator);
+    const api = await window.cardano.nami.enable();
+    lucid.selectWallet(api);
 
-  // 4. Preparamos el Datum (Dueño + 30 segundos)
-  const ownerPkh = lucid.utils.getAddressDetails(await lucid.wallet.address()).paymentCredential.hash;
-  const lockUntil = BigInt(Date.now() + 30000); // Tiempo actual + 30s
+    // 4. Obtener el validador desde el blueprint (plutus.json)
+    // Buscamos por el título que definiste en Aiken
+    const validatorEntry = blueprint.validators.find(
+      (v) => v.title === "peg_defense.spend" || v.title.includes("spend")
+    );
+    
+    if (!validatorEntry) throw new Error("Validador no encontrado en plutus.json");
 
-  const datum = Data.to({
-    owner: ownerPkh,
-    lock_until: lockUntil,
-  }, PegDatum);
+    const validator = {
+      type: "PlutusV2",
+      script: validatorEntry.compiledCode,
+    };
 
-  // 5. Construimos la Transacción
-  const tx = await lucid
-    .newTx()
-    .payToContract(scriptAddress, { inline: datum }, { lovelace: BigInt(amountADA * 1000000) })
-    .complete();
+    const scriptAddress = lucid.utils.validatorToAddress(validator);
 
-  const signedTx = await tx.sign().complete();
-  return await signedTx.submit();
+    // 5. Preparar Datos del Datum
+    const address = await lucid.wallet.address();
+    const details = lucid.utils.getAddressDetails(address);
+    const ownerPkh = details.paymentCredential.hash;
+    
+    // Bloqueo por 30 segundos (convertido a milisegundos POSIX)
+    const lockUntil = BigInt(Date.now() + 30000); 
+
+    const datum = Data.to(
+      {
+        owner: ownerPkh,
+        lock_until: lockUntil,
+      },
+      PegDatumSchema
+    );
+
+    // 6. Construir y enviar Transacción
+    const tx = await lucid
+      .newTx()
+      .payToContract(scriptAddress, { inline: datum }, { lovelace: BigInt(amountADA * 1000000) })
+      .complete();
+
+    const signedTx = await tx.sign().complete();
+    const txHash = await signedTx.submit();
+
+    console.log("Transacción enviada con éxito:", txHash);
+    return txHash;
+
+  } catch (error) {
+    console.error("Error en la transacción de Cardano:", error);
+    throw error;
+  }
 };

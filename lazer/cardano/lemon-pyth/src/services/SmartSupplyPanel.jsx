@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Lucid, Blockfrost, Data } from "@lucid-evolution/lucid";
-import blueprint from "../assets/plutus.json"; // Asegúrate de que la ruta sea correcta
+import { Lucid, Blockfrost, Data } from "lucid-cardano";
+import blueprint from "../assets/plutus.json"; 
 
 const SmartSupplyPanel = ({ selected, isLoading }) => {
-    // Estados de Transacción y UI
     const [txState, setTxState] = useState('IDLE'); 
     const [orderType, setOrderType] = useState('MARKET'); 
     const [timeLeft, setTimeLeft] = useState(0);
@@ -11,20 +10,26 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
     const [lucid, setLucid] = useState(null);
 
     // --- LÓGICA DE CONEXIÓN A CARDANO ---
-    
     useEffect(() => {
         const initBlockchain = async () => {
             try {
+                // Pequeña espera para asegurar que Wasm/Polyfills cargaron
+                await new Promise(res => setTimeout(res, 500));
+                
                 const lib = await Lucid.new(
                     new Blockfrost(
                         "https://cardano-preprod.blockfrost.io/api/v0",
-                        "preprodW9VepmQEx3r9LPr3QncreNvkBDApZD8m" // Tu Project ID
+                        "preprodW9VepmQEx3r9LPr3QncreNvkBDApZD8m" 
                     ),
                     "Preprod"
                 );
-                const api = await window.cardano.nami.enable();
-                lib.selectWallet(api);
-                setLucid(lib);
+                
+                if (window.cardano && window.cardano.nami) {
+                    const api = await window.cardano.nami.enable();
+                    lib.selectWallet(api);
+                    setLucid(lib);
+                    console.log("✅ Cardano Ledger Ready");
+                }
             } catch (err) {
                 console.error("Wallet connection failed:", err);
             }
@@ -32,13 +37,13 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
         initBlockchain();
     }, []);
 
-    const PegDatum = Data.Object({
+    // Definimos el Schema del Datum (Aiken)
+    const PegDatumSchema = Data.Object({
         owner: Data.Bytes,
         lock_until: Data.Integer,
     });
 
     // --- ACCIONES ON-CHAIN ---
-
     const handleInitiate = async () => {
         if (!selected || !lucid) return;
 
@@ -46,29 +51,35 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
             setTxState('PENDING');
             setTimeLeft(30);
 
-            const validator = blueprint.validators.find(v => v.title === "peg_defense.spend");
+            // Buscamos el validador en el blueprint
+            const validatorEntry = blueprint.validators.find(v => v.title === "peg_defense.spend" || v.title.includes("spend"));
+            if (!validatorEntry) throw new Error("Validator not found in plutus.json");
+
+            const validator = {
+                type: "PlutusV2",
+                script: validatorEntry.compiledCode,
+            };
+
             const scriptAddress = lucid.utils.validatorToAddress(validator);
+            const address = await lucid.wallet.address();
+            const ownerPkh = lucid.utils.getAddressDetails(address).paymentCredential.hash;
             
-            const details = lucid.utils.getAddressDetails(await lucid.wallet.address());
-            const ownerPkh = details.paymentCredential.hash;
-            
-            // Calculamos el tiempo de bloqueo (Ahora + 30s)
             const lockUntil = BigInt(Date.now() + 30000);
 
             const datum = Data.to({
                 owner: ownerPkh,
                 lock_until: lockUntil,
-            }, PegDatum);
+            }, PegDatumSchema);
 
-            // Construimos la transacción de bloqueo (Commit)
+            // Ejecución de la Tx
             const tx = await lucid
                 .newTx()
-                .payToContract(scriptAddress, { inline: datum }, { lovelace: 10000000n }) // 10 ADA de ejemplo
+                .payToContract(scriptAddress, { inline: datum }, { lovelace: 10000000n }) 
                 .complete();
 
             const signedTx = await tx.sign().complete();
             const txHash = await signedTx.submit();
-            console.log("Tx Committed:", txHash);
+            console.log("🔥 Tx Committed to Ledger:", txHash);
 
         } catch (error) {
             console.error("Blockchain Error:", error);
@@ -78,14 +89,12 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
     };
 
     const handleRevert = async () => {
-        // Aquí iría la lógica de 'Cancel' contra el script
         setTxState('IDLE');
         setTimeLeft(0);
         console.log("🛑 Transacción revertida on-chain");
     };
 
-    // --- LÓGICA VISUAL (Tu código original) ---
-
+    // --- LÓGICA DE UI ---
     const arbOpportunity = useMemo(() => {
         if (!selected || txState !== 'IDLE') return null;
         const threshold = 0.15;
@@ -132,7 +141,7 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                 ))}
             </div>
 
-            {/* MONITOR DE ESTADO Y TIMELOCK */}
+            {/* MONITOR DE ESTADO */}
             <div className={`mb-6 p-4 border rounded-xl transition-all duration-500 ${
                 txState === 'PENDING' ? 'border-yellow-500/50 bg-yellow-500/5 shadow-[0_0_15px_rgba(234,179,8,0.05)]' :
                 txState === 'LOCKING' ? 'border-blue-500/50 bg-blue-500/5 animate-pulse' : 
@@ -158,7 +167,7 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                 )}
             </div>
 
-            {/* SECCIÓN DINÁMICA DE PRECIOS */}
+            {/* PRECIOS PYTH */}
             <div className="space-y-3 mb-6">
                 <div className="p-3 bg-white/5 border border-white/5 rounded-lg flex justify-between items-center">
                     <span className="text-[9px] text-gray-500 uppercase">Pyth Oracle</span>
@@ -190,22 +199,20 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                 )}
             </div>
 
-            {/* ACCIONES DEL PROTOCOLO */}
+            {/* ACCIONES */}
             <div className="flex-1 flex flex-col gap-3">
                 {txState === 'IDLE' ? (
-                    <>
-                        <button 
-                            disabled={!selected || !lucid}
-                            onClick={handleInitiate}
-                            className={`w-full py-5 rounded-xl font-black text-xs tracking-[0.2em] transition-all active:scale-95 ${
-                                arbOpportunity 
-                                ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/10' 
-                                : 'bg-white text-black hover:bg-slate-200 opacity-90'
-                            } disabled:opacity-20`}
-                        >
-                            {arbOpportunity ? 'EXECUTE ARBITRAGE' : `INITIATE ${orderType}`}
-                        </button>
-                    </>
+                    <button 
+                        disabled={!selected || !lucid}
+                        onClick={handleInitiate}
+                        className={`w-full py-5 rounded-xl font-black text-xs tracking-[0.2em] transition-all active:scale-95 ${
+                            arbOpportunity 
+                            ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/10' 
+                            : 'bg-white text-black hover:bg-slate-200 opacity-90'
+                        } disabled:opacity-20`}
+                    >
+                        {arbOpportunity ? 'EXECUTE ARBITRAGE' : `INITIATE ${orderType}`}
+                    </button>
                 ) : txState === 'PENDING' ? (
                     <div className="flex flex-col gap-4">
                         <div className="text-center py-4 bg-yellow-500/5 border border-yellow-500/20 rounded-xl">
@@ -223,7 +230,7 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                     <div className="flex flex-col items-center justify-center h-40 gap-4">
                         <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
                         <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest">Validating Ledger...</p>
-                        <p className="text-[9px] text-gray-600 italic">Immutable state in {timeLeft}s</p>
+                        <p className="text-[9px] text-gray-600 italic">Confirmation via Blockfrost</p>
                     </div>
                 ) : (
                     <div className="text-center p-6 bg-green-500/5 border border-green-500/20 rounded-xl animate-in zoom-in-95 duration-500">
@@ -231,7 +238,7 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                             <span className="text-green-500 text-xl">✓</span>
                         </div>
                         <p className="text-xs text-white font-black uppercase mb-1">Success</p>
-                        <p className="text-[9px] text-gray-500 mb-4">Ledger confirmed via Pyth V2</p>
+                        <p className="text-[9px] text-gray-500 mb-4">Confirmed at script: {blueprint.validators[0].title}</p>
                         <button 
                             onClick={() => setTxState('IDLE')}
                             className="text-[9px] text-blue-400 font-black uppercase hover:underline"
@@ -242,14 +249,13 @@ const SmartSupplyPanel = ({ selected, isLoading }) => {
                 )}
             </div>
 
-            {/* FOOTER: VALIDACIÓN */}
             <div className="mt-6 pt-4 border-t border-white/5 flex flex-col gap-2">
                 <div className="flex justify-between items-center text-[8px] text-gray-600 font-bold">
                     <span>POLICY ID</span>
                     <span className="text-blue-900">VERIFIED</span>
                 </div>
                 <p className="text-[7px] text-gray-700 break-all font-mono opacity-50">
-                    d799d287105dea9377cdf9ea8502a83d2b9eb2d2050a8aea800a21e6
+                    {blueprint.validators[0].hash}
                 </p>
             </div>
         </div>
